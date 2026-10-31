@@ -1,0 +1,309 @@
+
+
+import math
+
+
+# ---------------------------------------------------------
+# Unit
+# ---------------------------------------------------------
+
+class Unit:
+    def __init__(self, x, y, name):
+        self.x = x
+        self.y = y
+        self.name = name
+
+
+# ---------------------------------------------------------
+# Influence Map
+# ---------------------------------------------------------
+
+class InfluenceMap:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.values = [
+            [0.0 for _ in range(width)]
+            for _ in range(height)
+        ]
+
+    def add_influence(self, unit, strength, radius):
+        for y in range(self.height):
+            for x in range(self.width):
+
+                distance = math.sqrt(
+                    (x - unit.x) ** 2 +
+                    (y - unit.y) ** 2
+                )
+
+                if distance <= radius:
+                    value = strength * (
+                        1 - distance / radius
+                    )
+
+                    self.values[y][x] += value
+
+    def get_value(self, x, y):
+        return self.values[y][x]
+
+
+# ---------------------------------------------------------
+# Influence Map Tree
+# ---------------------------------------------------------
+
+class InfluenceMapTree:
+
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+
+    def create_attack_map(
+        self,
+        enemy_map,
+        oil_map,
+        friendly_map
+    ):
+
+        result = [
+            [0.0 for _ in range(self.width)]
+            for _ in range(self.height)
+        ]
+
+        for y in range(self.height):
+            for x in range(self.width):
+
+                # Attack =
+                # enemy influence
+                # + oil platform influence
+                # - friendly unit influence
+
+                result[y][x] = (
+                    enemy_map.get_value(x, y)
+                    + oil_map.get_value(x, y)
+                    - friendly_map.get_value(x, y)
+                )
+
+        return result
+
+    def create_escape_map(
+        self,
+        enemy_map
+    ):
+
+        result = [
+            [0.0 for _ in range(self.width)]
+            for _ in range(self.height)
+        ]
+
+        for y in range(self.height):
+            for x in range(self.width):
+
+                # Negative enemy influence means
+                # move away from the enemy.
+
+                result[y][x] = (
+                    -enemy_map.get_value(x, y)
+                )
+
+        return result
+
+    def choose_best_location(
+        self,
+        attack_map,
+        escape_map
+    ):
+
+        best_x = 0
+        best_y = 0
+        best_value = float("-inf")
+        best_action = ""
+
+        for y in range(self.height):
+            for x in range(self.width):
+
+                attack_value = attack_map[y][x]
+                escape_value = escape_map[y][x]
+
+                # OR node:
+                # choose the larger value.
+
+                if attack_value >= escape_value:
+
+                    value = attack_value
+                    action = "ATTACK"
+
+                else:
+
+                    value = escape_value
+                    action = "ESCAPE"
+
+                if value > best_value:
+
+                    best_value = value
+                    best_x = x
+                    best_y = y
+                    best_action = action
+
+        return (
+            best_x,
+            best_y,
+            best_value,
+            best_action
+        )
+
+
+# ---------------------------------------------------------
+# Main Program
+# ---------------------------------------------------------
+
+def main():
+
+    WIDTH = 20
+    HEIGHT = 20
+
+    # Create units
+
+    enemy = Unit(
+        15,
+        15,
+        "Enemy Destroyer"
+    )
+
+    oil_platform = Unit(
+        10,
+        10,
+        "Oil Platform"
+    )
+
+    friendly = Unit(
+        5,
+        5,
+        "Friendly Boat"
+    )
+
+    # -----------------------------------------------------
+    # Create Influence Maps
+    # -----------------------------------------------------
+
+    enemy_map = InfluenceMap(
+        WIDTH,
+        HEIGHT
+    )
+
+    oil_map = InfluenceMap(
+        WIDTH,
+        HEIGHT
+    )
+
+    friendly_map = InfluenceMap(
+        WIDTH,
+        HEIGHT
+    )
+
+    # Enemy influence
+    enemy_map.add_influence(
+        enemy,
+        10,
+        6
+    )
+
+    # Oil platform influence
+    oil_map.add_influence(
+        oil_platform,
+        8,
+        8
+    )
+
+    # Friendly unit influence
+    friendly_map.add_influence(
+        friendly,
+        5,
+        5
+    )
+
+    # -----------------------------------------------------
+    # Create Influence Map Tree
+    # -----------------------------------------------------
+
+    tree = InfluenceMapTree(
+        WIDTH,
+        HEIGHT
+    )
+
+    # Attack branch
+    attack_map = tree.create_attack_map(
+        enemy_map,
+        oil_map,
+        friendly_map
+    )
+
+    # Escape branch
+    escape_map = tree.create_escape_map(
+        enemy_map
+    )
+
+    # OR node chooses the best action
+    x, y, value, action = tree.choose_best_location(
+        attack_map,
+        escape_map
+    )
+
+    # -----------------------------------------------------
+    # Output
+    # -----------------------------------------------------
+
+    print("===================================")
+    print("      INFLUENCE MAP TREE")
+    print("===================================")
+
+    print("Enemy position:")
+    print("(", enemy.x, ",", enemy.y, ")")
+
+    print("Oil platform position:")
+    print("(", oil_platform.x, ",", oil_platform.y, ")")
+
+    print("Friendly boat position:")
+    print("(", friendly.x, ",", friendly.y, ")")
+
+    print("-----------------------------------")
+
+    print("Best location:")
+    print("X =", x)
+    print("Y =", y)
+
+    print("Influence value:")
+    print(round(value, 2))
+
+    print("Decision:")
+    print(action)
+
+    print("===================================")
+
+
+# ---------------------------------------------------------
+# Start Program
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+    main()
+
+     
+===================================
+      INFLUENCE MAP TREE
+===================================
+Enemy position:
+( 15 , 15 )
+Oil platform position:
+( 10 , 10 )
+Friendly boat position:
+( 5 , 5 )
+-----------------------------------
+Best location:
+X = 15
+Y = 15
+Influence value:
+10.93
+Decision:
+ATTACK
+===================================
+https://www.cse.unr.edu/~sushil/pubs/newestPapers/ogre/newestPapers/2006/cec2006/cec2006.pdf
