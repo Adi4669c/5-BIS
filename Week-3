@@ -1,0 +1,257 @@
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+# =====================================================================
+# 1. DNA Feature Encoder (Transformer-Based)
+# =====================================================================
+class DNATransformerEncoder(nn.Module):
+    """
+    Maps genetic sequence data (representing SNPs) into a robust genetic latent space
+    using a PyTorch Transformer Encoder.
+    """
+    def __init__(self, input_dim=4, model_dim=128, num_heads=4, num_layers=3, latent_dim=256):
+        super().__init__()
+        self.token_embedding = nn.Linear(input_dim, model_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=model_dim,
+            nhead=num_heads,
+            dim_feedforward=model_dim * 4,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc_out = nn.Linear(model_dim, latent_dim)
+
+    def forward(self, dna_seq):
+        # dna_seq shape: [batch_size, sequence_length, input_dim]
+        embedded = self.token_embedding(dna_seq)
+        transformed = self.transformer(embedded) # [batch_size, sequence_length, model_dim]
+        # Global average pooling over the sequence dimension
+        pooled = transformed.mean(dim=1)
+        latent = self.fc_out(pooled) # [batch_size, latent_dim]
+        return latent
+
+# =====================================================================
+# 2. 3D Facial Feature Conditioned Diffusion Model (Denoising Network)
+# =====================================================================
+class ConditionalDenoisingNetwork(nn.Module):
+    """
+    A denoising network that takes noisy 3D facial representations, diffusion time-step,
+    DNA latent embeddings, and age scalar to predict the added noise.
+    """
+    def __init__(self, face_dim=128, latent_dim=256, time_emb_dim=64):
+        super().__init__()
+        # Time-step embedding
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_emb_dim, time_emb_dim),
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, latent_dim)
+        )
+
+        # Age projection
+        self.age_mlp = nn.Sequential(
+            nn.Linear(1, time_emb_dim),
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, latent_dim)
+        )
+
+        # Main denoising network blocks
+        self.input_layer = nn.Linear(face_dim, latent_dim)
+
+        # Conditioning fusion blocks (combining noisy face features + DNA latent + age + time)
+        self.mid_block = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.LayerNorm(latent_dim),
+            nn.SiLU(),
+            nn.Linear(latent_dim, latent_dim)
+        )
+
+        self.out_layer = nn.Linear(latent_dim, face_dim)
+
+    def _get_timestep_embedding(self, timesteps, embedding_dim):
+        """Sinusoidal timestep embedding generator."""
+        half_dim = embedding_dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=timesteps.device) * -emb)
+        emb = timesteps.float().unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        return emb
+
+    def forward(self, x_t, t, dna_latent, age):
+        # x_t: Noisy face representation [batch_size, face_dim]
+        # t: Timestep index [batch_size]
+        # dna_latent: [batch_size, latent_dim]
+        # age: [batch_size, 1]
+
+        # Embed timestep and age
+        t_emb = self._get_timestep_embedding(t, embedding_dim=64)
+        t_latent = self.time_mlp(t_emb)
+        age_latent = self.age_mlp(age)
+
+        # Project noisy inputs
+        h = self.input_layer(x_t)
+
+        # Merge all conditioning elements into the latent representations
+        condition = dna_latent + t_latent + age_latent
+        h = h + condition
+
+        # Processing through intermediate network blocks
+        h = self.mid_block(h)
+
+        # Predict structural noise
+        predicted_noise = self.out_layer(h)
+        return predicted_noise
+
+# =====================================================================
+# 3. Multi-Modality Contrastive Alignment Module
+# =====================================================================
+class ContrastiveAligner(nn.Module):
+    """
+    Aligns the DNA latent space and the 3D facial feature space using CLIP-like loss.
+    """
+    def __init__(self, dna_latent_dim=256, face_feat_dim=128, shared_dim=128):
+        super().__init__()
+        self.dna_projection = nn.Linear(dna_latent_dim, shared_dim)
+        self.face_projection = nn.Linear(face_feat_dim, shared_dim)
+        self.logit_scale = nn.Parameter(torch.ones([]) * log(1 / 0.07))
+
+    def forward(self, dna_latents, face_features):
+        # Project both modalities to shared semantic space
+        proj_dna = F.normalize(self.dna_projection(dna_latents), dim=-1)
+        proj_face = F.normalize(self.face_projection(face_features), dim=-1)
+
+        # Compute cosine similarity matrix
+        t = self.logit_scale.exp()
+        logits_per_dna = t * torch.matmul(proj_dna, proj_face.t())
+        logits_per_face = logits_per_dna.t()
+
+        # Target symmetric indices representing ground truth correspondence
+        targets = torch.arange(dna_latents.size(0), device=dna_latents.device)
+
+        loss_dna = F.cross_entropy(logits_per_dna, targets)
+        loss_face = F.cross_entropy(logits_per_face, targets)
+
+        return (loss_dna + loss_face) / 2.0
+
+# =====================================================================
+# 4. Difface Unified System Wrapper
+# =====================================================================
+class DiffaceSystem(nn.Module):
+    def __init__(self, dna_seq_len=100, dna_features=4, face_dim=128, latent_dim=256, num_steps=100):
+        super().__init__()
+        self.num_steps = num_steps
+
+        # Model Components
+        self.dna_encoder = DNATransformerEncoder(input_dim=dna_features, latent_dim=latent_dim)
+        self.denoising_net = ConditionalDenoisingNetwork(face_dim=face_dim, latent_dim=latent_dim)
+        self.aligner = ContrastiveAligner(dna_latent_dim=latent_dim, face_feat_dim=face_dim)
+
+        # Standard DDPM linear noise schedule constants
+        self.beta = torch.linspace(1e-4, 0.02, num_steps)
+        self.alpha = 1.0 - self.beta
+        self.alpha_hat = torch.cumprod(self.alpha, dim=0)
+
+    def get_noise_parameters(self, device):
+        self.alpha_hat = self.alpha_hat.to(device)
+        return self.alpha_hat
+
+    def forward_diffusion_step(self, x_0, t, noise):
+        """Applies forward diffusion to obtain x_t from initial x_0 at timestep t."""
+        alpha_hat = self.get_noise_parameters(x_0.device)
+        alpha_hat_t = alpha_hat[t].view(-1, 1)
+
+        # Closed-form sampling of intermediate diffusion steps
+        x_t = torch.sqrt(alpha_hat_t) * x_0 + torch.sqrt(1 - alpha_hat_t) * noise
+        return x_t
+
+    def compute_losses(self, dna_seq, true_face, age):
+        device = dna_seq.device
+        batch_size = dna_seq.size(0)
+
+        # Step 1: Encode DNA sequence representations
+        dna_latents = self.dna_encoder(dna_seq)
+
+        # Step 2: Calculate Contrastive Alignment Loss
+        contrastive_loss = self.aligner(dna_latents, true_face)
+
+        # Step 3: Denoising Diffusion Probabilistic Step
+        t = torch.randint(0, self.num_steps, (batch_size,), device=device).long()
+        noise = torch.randn_like(true_face)
+
+        # Forward diffuse the ground truth 3D face structure
+        x_t = self.forward_diffusion_step(true_face, t, noise)
+
+        # Predict noise added at timestep t, conditioned on DNA latent embedding and age
+        predicted_noise = self.denoising_net(x_t, t, dna_latents, age)
+
+        # Mean squared error reconstruction loss
+        diffusion_loss = F.mse_loss(predicted_noise, noise)
+
+        return diffusion_loss, contrastive_loss
+
+# =====================================================================
+# Helper helper function for scalar logarithm
+# =====================================================================
+def log(x):
+    return math.log(x)
+
+# =====================================================================
+# 5. Pipeline Demonstration & Executable Mock Loop
+# =====================================================================
+if __name__ == "__main__":
+    # Set device configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Executing training pipeline on device: {device}\n")
+
+    # Instantiate the system
+    model = DiffaceSystem(
+        dna_seq_len=100,
+        dna_features=4,
+        face_dim=128,
+        latent_dim=256,
+        num_steps=100
+    ).to(device)
+
+    # Generate Mock Training Data
+    batch_size = 16
+    mock_dna = torch.randn(batch_size, 100, 4, device=device)       # [batch_size, sequence_length, features]
+    mock_age = torch.rand(batch_size, 1, device=device) * 100        # Scalar ages from 0 to 100
+    mock_face = torch.randn(batch_size, 128, device=device)          # Core structural 3D facial representations
+
+    # Setup training loop variables
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    num_epochs = 5
+
+    print("--- Starting Mock Training Loop ---")
+    for epoch in range(1, num_epochs + 1):
+        optimizer.zero_grad()
+
+        # Compute losses
+        diff_loss, align_loss = model.compute_losses(mock_dna, mock_face, mock_age)
+
+        # Combine objective functions with specific weights
+        total_loss = diff_loss + 0.1 * align_loss
+
+        total_loss.backward()
+        optimizer.step()
+
+        print(f"Epoch {epoch:02d}/{num_epochs:02d} | "
+              f"Diffusion MSE: {diff_loss.item():.4f} | "
+              f"Contrastive Align Loss: {align_loss.item():.4f} | "
+              f"Total Combined Loss: {total_loss.item():.4f}")
+
+    print("\nDifface architectural implementation and execution test completed successfully.")
+     
+Executing training pipeline on device: cpu
+
+--- Starting Mock Training Loop ---
+Epoch 01/05 | Diffusion MSE: 0.9912 | Contrastive Align Loss: 2.9409 | Total Combined Loss: 1.2853
+Epoch 02/05 | Diffusion MSE: 1.0633 | Contrastive Align Loss: 3.4528 | Total Combined Loss: 1.4086
+Epoch 03/05 | Diffusion MSE: 1.0759 | Contrastive Align Loss: 3.3152 | Total Combined Loss: 1.4074
+Epoch 04/05 | Diffusion MSE: 1.0070 | Contrastive Align Loss: 3.1037 | Total Combined Loss: 1.3173
+Epoch 05/05 | Diffusion MSE: 1.0009 | Contrastive Align Loss: 2.9070 | Total Combined Loss: 1.2916
+
+Difface architectural implementation and execution test completed successfully.
